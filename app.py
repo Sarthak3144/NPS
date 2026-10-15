@@ -3,6 +3,8 @@ import os
 import wave
 import re
 import random
+import sqlite3
+import datetime
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from rapidfuzz import process, fuzz
@@ -12,13 +14,61 @@ from gtts import gTTS
 # PAGE CONFIGURATION
 # =====================================================================
 st.set_page_config(
-    page_title="NPS Voice-Activated Utility & Payment Hub",
-    page_icon="💳",
-    layout="centered"
+    page_title="Nepal Payment Solution - Executive Voice Hub",
+    page_icon="🇳🇵",
+    layout="wide"
 )
 
 # =====================================================================
-# MOCK DATABASES (Nepal Payment Solution)
+# SQLITE DATABASE LEDGER SETUP (Layer 6)
+# =====================================================================
+DB_FILE = "nps_ledger.db"
+
+def init_db():
+    """Initializes the SQLite transaction ledger table if not present."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            tx_id TEXT PRIMARY KEY,
+            timestamp TEXT,
+            intent TEXT,
+            service_or_recipient TEXT,
+            account_bank TEXT,
+            amount INTEGER,
+            status TEXT,
+            raw_transcript TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def log_transaction(tx_id, intent, target, bank, amount, transcript, status="SUCCESS"):
+    """Inserts a completed transaction record into the local SQLite database."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("""
+        INSERT INTO transactions (tx_id, timestamp, intent, service_or_recipient, account_bank, amount, status, raw_transcript)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (tx_id, timestamp, intent, target, bank, amount, status, transcript))
+    conn.commit()
+    conn.close()
+
+def fetch_transactions():
+    """Retrieves all transaction logs from the SQLite ledger."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM transactions ORDER BY timestamp DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+# Initialize DB on load
+init_db()
+
+# =====================================================================
+# MOCK DATABASES
 # =====================================================================
 USER_CONTACTS = [
     {"id": "ACC101", "name": "Ram Sharma", "bank": "Nabil Bank"},
@@ -39,27 +89,25 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 
 # =====================================================================
-# CACHED ASR MODEL LOADING
+# CACHED ASR MODEL
 # =====================================================================
 @st.cache_resource
 def load_whisper_model():
     return WhisperModel("base", device="cpu", compute_type="int8")
 
-with st.spinner("Initializing ASR Core Engine (Faster-Whisper)..."):
+with st.spinner("Initializing Local ASR Engine (Faster-Whisper)..."):
     asr_model = load_whisper_model()
 
 # =====================================================================
-# HELPER FUNCTIONS (Voice-to-Voice Helpers)
+# HELPER FUNCTIONS
 # =====================================================================
 def speak_and_play(text):
-    """Generates TTS audio and saves it to session state for auto-playing in Streamlit."""
     tts = gTTS(text=text, lang='en', slow=False)
     tts.save(RESPONSE_AUDIO)
     st.session_state.last_spoken_text = text
     st.session_state.play_audio_flag = True
 
-def record_audio(duration_seconds=8):
-    """Records live audio from microphone."""
+def record_audio(duration_seconds=12):
     audio_data = sd.rec(
         int(duration_seconds * SAMPLE_RATE), 
         samplerate=SAMPLE_RATE, 
@@ -74,7 +122,6 @@ def record_audio(duration_seconds=8):
         wf.writeframes(audio_data.tobytes())
 
 def transcribe_audio():
-    """Transcribes audio using Whisper with Nepali/Neplish optimization."""
     segments, info = asr_model.transcribe(
         AUDIO_FILENAME, 
         beam_size=5, 
@@ -85,7 +132,6 @@ def transcribe_audio():
     return "".join([segment.text for segment in segments]).strip(), info.language
 
 def parse_voice_command(transcript):
-    """NLU Intent & Slot Parser with bilingual keyword matching."""
     t_lower = transcript.lower()
     intent = "unknown"
     if any(k in t_lower for k in ["electricity", "light", "nea", "bijuli", "water", "khanepani", "internet", "wifi", "bill", "pani"]):
@@ -106,7 +152,7 @@ def parse_voice_command(transcript):
     recipient_query = ""
     if intent == "transfer_funds":
         cleaned = t_lower
-        stop_words = ["pay", "send", "transfer", "rs", "rupees", "rupaiyan", "rupy", "to", "laai", "lai", "pathauna", "pathaune", "patha", "pathaideu", "pthauna", "ma", "le", "nepal"]
+        stop_words = ["pay", "send", "transfer", "rs", "rupees", "rupaiyan", "rupy", "to", "laai", "lai", "pathauna", "pathaune", "patha", "pathaideu", "pthauna", "ma", "le", "nepal", "paisa"]
         for word in stop_words:
             cleaned = cleaned.replace(word, "")
         if amount:
@@ -116,7 +162,6 @@ def parse_voice_command(transcript):
     return {"intent": intent, "amount": amount, "recipient_query": recipient_query, "utility_service": detected_utility}
 
 def resolve_recipient(query):
-    """Fuzzy matching contact resolution."""
     contact_names = [c["name"] for c in USER_CONTACTS]
     matches = process.extract(query, contact_names, scorer=fuzz.token_sort_ratio, limit=3)
     valid_matches = [m for m in matches if m[1] > 30]
@@ -138,134 +183,278 @@ def resolve_recipient(query):
     return matched_contacts[0], "exact"
 
 # =====================================================================
-# STREAMLIT UI LAYOUT
+# EXECUTIVE DASHBOARD UI (TABBED INTERFACE)
 # =====================================================================
 st.title("🇳🇵 Nepal Payment Solution (NPS)")
-st.subheader("Voice-to-Voice Interactive Utility & Payment Hub")
-st.markdown("---")
+st.subheader("Executive Voice-to-Voice Stakeholder Demonstration Hub")
 
-# Initialize Session State
-if "transcript" not in st.session_state:
-    st.session_state.transcript = ""
-if "parsed" not in st.session_state:
-    st.session_state.parsed = None
-if "step" not in st.session_state:
+tab_voice, tab_ledger = st.tabs(["🎙️ Voice Payment Terminal", "📜 SQLite Ledger & Receipt History"])
+
+# Session State Initialization
+if "transcript" not in st.session_state: st.session_state.transcript = ""
+if "parsed" not in st.session_state: st.session_state.parsed = None
+if "step" not in st.session_state: 
     st.session_state.step = "idle"
-if "play_audio_flag" not in st.session_state:
-    st.session_state.play_audio_flag = False
-if "last_spoken_text" not in st.session_state:
-    st.session_state.last_spoken_text = ""
+    speak_and_play("Nepal payment solution voice hub is ready. Please state your transaction command.")
 
-# Audio playback widget if assistant spoke
-if st.session_state.play_audio_flag and os.path.exists(RESPONSE_AUDIO):
-    st.audio(RESPONSE_AUDIO, format="audio/mp3", autoplay=True)
-    st.info(f"🔊 **Assistant Spoke:** \"{st.session_state.last_spoken_text}\"")
+if "play_audio_flag" not in st.session_state: st.session_state.play_audio_flag = False
+if "last_spoken_text" not in st.session_state: st.session_state.last_spoken_text = ""
 
-# Main Action Button
-col1, col2 = st.columns([1, 1])
-with col1:
-    record_button = st.button("🎤 Click & Speak Command", type="primary", use_container_width=True)
+# Sidebar Progress Tracking
+st.sidebar.title(" Pipeline Progress")
+steps_status = {
+    "idle": "1. Ready / Initialized",
+    "process": "2. Intent & Slot Filling",
+    "ask_recipient": "3. Collecting Recipient",
+    "ask_amount": "4. Collecting Amount",
+    "confirm_voice": "5. Voice Confirmation",
+    "otp_stage": "6. Secure OTP Verification",
+    "success": "7. Ledger Commit Complete"
+}
+for k, v in steps_status.items():
+    if st.session_state.step == k:
+        st.sidebar.markdown(f"👉 **{v}**")
+    else:
+        st.sidebar.markdown(f"<span style='color:grey;'>{v}</span>", unsafe_allow_html=True)
 
-if record_button:
-    st.session_state.play_audio_flag = False
-    with st.spinner("Listening to voice command (8 seconds)..."):
-        record_audio(duration_seconds=8)
-    with st.spinner("Processing speech transcription & NLU..."):
-        transcript, lang = transcribe_audio()
-        st.session_state.transcript = transcript
-        st.session_state.parsed = parse_voice_command(transcript)
-        st.session_state.step = "process"
 
-# Display Transcript
-if st.session_state.transcript:
-    st.markdown("### 📝 Live ASR & NLU Analysis")
-    st.write(f"**Heard:** \"{st.session_state.transcript}\"")
-    st.json(st.session_state.parsed)
+# =====================================================================
+# TAB 1: VOICE PAYMENT TERMINAL
+# =====================================================================
+with tab_voice:
+    col_ctrl, col_telemetry = st.columns([1.2, 1])
 
-# Voice-to-Voice Interactive Logic Loop
-if st.session_state.step == "process" and st.session_state.parsed:
-    parsed = st.session_state.parsed
-    
-    if parsed["intent"] == "unknown":
-        msg = "I could not understand your transaction request. Please try stating it again."
-        speak_and_play(msg)
-        st.session_state.step = "idle"
-        st.rerun()
+    with col_ctrl:
+        st.markdown("### 🎙️ Live Voice Control")
+        st.info("The assistant is ready. Click below to record your voice command or respond to prompts.")
         
-    elif parsed["intent"] == "transfer_funds":
-        # Check missing amount
-        if not parsed["amount"]:
-            msg = "How much money would you like to transfer? Please specify the amount."
-            speak_and_play(msg)
-            st.error("❌ Missing Amount in command.")
-        # Check missing recipient
-        elif not parsed["recipient_query"]:
-            msg = "Who would you like to send money to? Please specify the recipient name."
-            speak_and_play(msg)
-            st.error("❌ Missing Recipient name.")
-        else:
-            result, status = resolve_recipient(parsed["recipient_query"])
+        btn_label = "🎤 Start Voice Command (12s)"
+        if st.session_state.step == "ask_recipient":
+            btn_label = "🎤 Speak Recipient Name (12s)"
+        elif st.session_state.step == "ask_amount":
+            btn_label = "🎤 Speak Amount (12s)"
+        elif st.session_state.step == "confirm_voice":
+            btn_label = "🎤 Speak Confirmation (Yes/No)"
+
+        if st.button(btn_label, type="primary", use_container_width=True):
+            st.session_state.play_audio_flag = False
+            with st.spinner("Recording live audio (12 seconds)... Speak clearly!"):
+                record_audio(duration_seconds=12)
             
-            if status == "no_match":
-                msg = f"I could not find a contact matching {parsed['recipient_query']} in your directory."
+            transcript, _ = transcribe_audio()
+            st.session_state.transcript = transcript
+
+            if st.session_state.step == "idle":
+                st.session_state.parsed = parse_voice_command(transcript)
+                st.session_state.step = "process"
+                st.rerun()
+                
+            elif st.session_state.step == "ask_recipient":
+                st.session_state.parsed["recipient_query"] = transcript.strip().title()
+                st.session_state.step = "process"
+                st.rerun()
+                
+            elif st.session_state.step == "ask_amount":
+                amt_match = re.search(r'(\d+)', transcript)
+                if amt_match:
+                    st.session_state.parsed["amount"] = int(amt_match.group(1))
+                st.session_state.step = "process"
+                st.rerun()
+                
+            elif st.session_state.step == "confirm_voice":
+                t_conf = transcript.lower()
+                if any(w in t_conf for w in ["yes", "yup", "ho", "sure", "ok", "confirm", "sahi"]):
+                    otp = random.randint(100000, 999999)
+                    st.session_state.otp_code = otp
+                    speak_and_play("Transaction confirmed. Please check your screen to enter your secret authorization code.")
+                    st.session_state.step = "otp_stage"
+                    st.rerun()
+                elif any(w in t_conf for w in ["no", "nah", "haina", "cancel", "stop"]):
+                    speak_and_play("Transaction cancelled by user voice command. Resetting hub.")
+                    st.session_state.step = "idle"
+                    st.rerun()
+                else:
+                    speak_and_play("I did not catch that clearly. Please say yes or no.")
+                    st.rerun()
+
+        # Audio Feedback Player
+        if st.session_state.play_audio_flag and os.path.exists(RESPONSE_AUDIO):
+            st.audio(RESPONSE_AUDIO, format="audio/mp3", autoplay=True)
+            st.success(f" **Assistant Spoke:** \"{st.session_state.last_spoken_text}\"")
+
+    with col_telemetry:
+        st.markdown("###  System Telemetry & NLU State")
+        if st.session_state.transcript:
+            st.text_area("Live Transcript Output", st.session_state.transcript, height=70)
+            st.json(st.session_state.parsed)
+        else:
+            st.info("System standing by for turn-by-turn voice dialog.")
+
+    st.markdown("---")
+
+    # Workflow Execution Logic
+    if st.session_state.step == "process" and st.session_state.parsed:
+        parsed = st.session_state.parsed
+        
+        if parsed["intent"] == "unknown":
+            speak_and_play("I did not recognize that command. Please state a fund transfer or utility payment.")
+            st.session_state.step = "idle"
+            st.rerun()
+            
+        elif parsed["intent"] == "transfer_funds":
+            if not parsed["recipient_query"]:
+                msg = "Who would you like to send money to? Please state the recipient name."
                 speak_and_play(msg)
-                st.error(f"❌ {msg}")
-            elif status == "ambiguous":
-                names = " or ".join([c["name"] for c in result])
-                msg = f"I found multiple matching accounts: {names}. Which Ram do you mean?"
-                speak_and_play(msg)
-                st.warning(f"⚠️ {msg}")
+                st.session_state.step = "ask_recipient"
+                st.rerun()
             else:
-                recipient = result
-                st.session_state.recipient = recipient
-                msg = f"Send {parsed['amount']} rupees to {recipient['name']} at {recipient['bank']}? Please type yes to confirm."
+                result, status = resolve_recipient(parsed["recipient_query"])
+                if status == "no_match":
+                    msg = f"Contact {parsed['recipient_query']} not found in directory. Transaction aborted."
+                    speak_and_play(msg)
+                    st.session_state.step = "idle"
+                    st.rerun()
+                elif status == "ambiguous":
+                    names = " or ".join([c["name"] for c in result])
+                    msg = f"Multiple accounts found: {names}. Which one do you mean?"
+                    speak_and_play(msg)
+                    st.session_state.step = "ask_recipient"
+                    st.rerun()
+                else:
+                    recipient = result
+                    st.session_state.recipient = recipient
+                    
+                    if not parsed["amount"]:
+                        msg = f"How much money would you like to send to {recipient['name']}?"
+                        speak_and_play(msg)
+                        st.session_state.step = "ask_amount"
+                        st.rerun()
+                    else:
+                        msg = f"Send {parsed['amount']} rupees to {recipient['name']} at {recipient['bank']}? Please say yes to confirm, or no to cancel."
+                        speak_and_play(msg)
+                        st.session_state.step = "confirm_voice"
+                        st.rerun()
+
+        elif parsed["intent"] == "pay_utility":
+            if not parsed["amount"]:
+                msg = f"How much is your bill amount for {parsed['utility_service']}?"
                 speak_and_play(msg)
-                st.session_state.step = "confirm_action"
+                st.session_state.step = "ask_amount"
+                st.rerun()
+            else:
+                msg = f"Pay utility bill of {parsed['amount']} rupees for {parsed['utility_service']}? Please say yes to confirm, or no to cancel."
+                speak_and_play(msg)
+                st.session_state.step = "confirm_voice"
                 st.rerun()
 
-    elif parsed["intent"] == "pay_utility":
-        if not parsed["amount"]:
-            msg = f"How much is your bill amount for {parsed['utility_service']}?"
-            speak_and_play(msg)
-            st.error("❌ Missing bill amount.")
-        else:
-            msg = f"Pay utility bill of {parsed['amount']} rupees for {parsed['utility_service']}? Please confirm."
-            speak_and_play(msg)
-            st.session_state.step = "confirm_action"
+    # OTP Verification Stage
+    if st.session_state.step == "otp_stage":
+        st.markdown("###  Secure Multi-Factor Authentication (OTP)")
+        st.warning(" [SECURITY PROTOCOL]: OTP is hidden from voice output and displayed securely on screen.")
+        st.info(f"**Generated Secret OTP:** {st.session_state.otp_code}")
+        
+        user_otp = st.text_input("Enter 6-digit verification code:", max_chars=6)
+        
+        if st.button("Verify & Commit Transaction"):
+            if user_otp == str(st.session_state.otp_code):
+                # GENERATE TX ID & COMMIT TO SQLITE LEDGER
+                tx_id = f"NPS-{random.randint(10000000, 99999999)}"
+                st.session_state.last_tx_id = tx_id
+                
+                parsed = st.session_state.parsed
+                if parsed["intent"] == "transfer_funds":
+                    target = st.session_state.recipient["name"]
+                    bank = st.session_state.recipient["bank"]
+                else:
+                    target = parsed["utility_service"]
+                    bank = "NPS Utility Gateway"
+                    
+                log_transaction(
+                    tx_id=tx_id,
+                    intent=parsed["intent"],
+                    target=target,
+                    bank=bank,
+                    amount=parsed["amount"],
+                    transcript=st.session_state.transcript
+                )
+                
+                speak_and_play("Transaction successfully completed, verified, and logged to ledger.")
+                st.session_state.step = "success"
+                st.rerun()
+            else:
+                st.error("Incorrect verification code.")
+
+    # Success Stage
+    if st.session_state.step == "success":
+        st.balloons()
+        st.success(f"🎉 Transaction Successfully Committed to SQLite Ledger! Reference ID: `{st.session_state.get('last_tx_id', 'N/A')}`")
+        if st.button("Start New Voice Transaction"):
+            st.session_state.transcript = ""
+            st.session_state.parsed = None
+            st.session_state.step = "idle"
+            st.session_state.play_audio_flag = False
             st.rerun()
 
-# Confirmation & OTP Step
-if st.session_state.step == "confirm_action":
-    st.markdown("### 🔒 Security & Confirmation")
-    
-    if st.button("Confirm Transaction"):
-        otp = random.randint(100000, 999999)
-        st.session_state.otp_code = otp
-        msg = f"Security authorization required. Your 6-digit code is {otp}."
-        speak_and_play(msg)
-        st.session_state.step = "otp_entry"
-        st.rerun()
 
-if st.session_state.step == "otp_entry":
-    st.markdown("### 🔐 Enter OTP Code")
-    st.info(f"Spoken OTP Code: **{st.session_state.otp_code}**")
-    user_otp = st.text_input("Enter 6-digit code:", max_chars=6)
+# =====================================================================
+# TAB 2: SQLITE LEDGER & RECEIPT HISTORY
+# =====================================================================
+with tab_ledger:
+    st.markdown("###  Permanent Transaction History (SQLite Database)")
+    st.info("Every voice-verified transaction is permanently stored in local database `nps_ledger.db`.")
     
-    if st.button("Verify OTP"):
-        if user_otp == str(st.session_state.otp_code):
-            success_msg = "Transaction successfully completed and logged to ledger."
-            speak_and_play(success_msg)
-            st.session_state.step = "success"
-            st.rerun()
-        else:
-            st.error("Incorrect OTP.")
-
-if st.session_state.step == "success":
-    st.balloons()
-    st.success("🎉 Transaction Completed Successfully!")
-    if st.button("Reset Hub"):
-        st.session_state.transcript = ""
-        st.session_state.parsed = None
-        st.session_state.step = "idle"
-        st.session_state.play_audio_flag = False
-        st.rerun()
+    rows = fetch_transactions()
+    
+    if not rows:
+        st.warning("No transactions recorded in ledger yet. Complete a voice payment to view records.")
+    else:
+        # Display Summary Table
+        table_data = []
+        for r in rows:
+            table_data.append({
+                "TX Reference ID": r[0],
+                "Timestamp": r[1],
+                "Intent": r[2].upper(),
+                "Recipient / Utility": r[3],
+                "Financial Provider": r[4],
+                "Amount (NPR)": f"Rs. {r[5]:,}",
+                "Status": r[6]
+            })
+        st.dataframe(table_data, use_container_width=True)
+        
+        st.markdown("---")
+        st.markdown("###  Interactive Receipt Generator")
+        selected_tx = st.selectbox("Select Transaction ID to view formal receipt:", [r[0] for r in rows])
+        
+        # Display Printable Audit Receipt Card
+        if selected_tx:
+            tx_detail = next(r for r in rows if r[0] == selected_tx)
+            
+            receipt_box = f"""
+            ```text
+            =============================================================
+                           NEPAL PAYMENT SOLUTION (NPS)
+                            OFFICIAL TRANSACTION RECEIPT
+            =============================================================
+            TRANSACTION ID : {tx_detail[0]}
+            DATE & TIME    : {tx_detail[1]}
+            STATUS         : {tx_detail[6]}
+            
+            TYPE           : {tx_detail[2].upper()}
+            BENEFICIARY    : {tx_detail[3]}
+            INSTITUTION    : {tx_detail[4]}
+            AMOUNT PAID    : Rs. {tx_detail[5]:,}.00 NPR
+            
+            VOICE COMMAND  : "{tx_detail[7]}"
+            VERIFICATION   : 6-Digit Voice-Triggered OTP Verified
+            =============================================================
+                          Thank you for using NPS Voice Hub!
+            ```
+            """
+            st.markdown(receipt_box)
+            st.download_button(
+                label="📄 Download Official Receipt (.txt)",
+                data=receipt_box.replace("```text\n", "").replace("\n            ```", ""),
+                file_name=f"Receipt_{selected_tx}.txt",
+                mime="text/plain"
+            )
